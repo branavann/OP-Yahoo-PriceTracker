@@ -42,6 +42,7 @@ import html
 import logging
 import argparse
 import itertools
+import statistics
 import webbrowser
 import datetime as dt
 from pathlib import Path
@@ -199,6 +200,11 @@ MERCARI_MAX_PER_QUERY = 80
 MERCARI_DELAY_SEC = 3.0
 
 OUTPUT_FILE = Path("index.html")
+# Every run appends to this archive. Yahoo's closedsearch only reaches back
+# ~180 days and Mercari less, so the archive is what lets the site show
+# trends beyond what either source will still tell us on any given day.
+HISTORY_FILE = Path("data/history.json")
+HISTORY_RETAIN_DAYS = 400
 TEMPLATE_FILE = Path("template.html")
 DATA_PLACEHOLDER = "/*__DATA__*/"
 # Cap the inlined payload so the page stays light. The front end filters
@@ -556,25 +562,37 @@ def normalise_mercari_item(raw):
 
 
 # =====================================================================
-# OUTPUT
+# HISTORY
 # =====================================================================
-# Python no longer renders finished HTML. It emits the data, and
-# template.html renders it in the browser - which is what makes search,
-# filtering, currency switching and the detail drawer possible at all.
 
-def build_payload(all_items: dict, rate: float) -> dict:
-    """Everything that qualifies, within the widest window, ranked by price."""
-    widest_hours = max(hours for _, hours, _ in WINDOWS)
-    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=widest_hours)
+def load_history() -> dict:
+    """Previously-seen sales, keyed by id."""
+    if not HISTORY_FILE.exists():
+        log.info("No history file yet - starting a fresh archive.")
+        return {}
+    try:
+        raw = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        return {r["id"]: r for r in raw.get("items", [])}
+    except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
+        # A corrupt archive must not stop today's build.
+        log.warning("Could not read history (%s). Starting fresh.", e)
+        return {}
 
-    rows = []
+
+def merge_history(history: dict, all_items: dict) -> dict:
+    """Fold this run's qualifying sales into the archive.
+
+    First sighting wins: a listing's price is final once sold, and keeping
+    the original record avoids a later re-scrape shifting a past figure."""
+    added = 0
     for item in all_items.values():
-        if not is_wanted(item):
+        if not is_wanted(item) or not item["end_date"]:
             continue
-        if not item["end_date"] or item["end_date"] < cutoff:
+        key = item["auction_id"]
+        if key in history:
             continue
-        rows.append({
-            "id": item["auction_id"],
+        history[key] = {
+            "id": key,
             "title": item["title"],
             "price": item["price_jpy"],
             "url": item["url"],
@@ -584,7 +602,108 @@ def build_payload(all_items: dict, rate: float) -> dict:
             "image": item.get("image_url") or "",
             "end": item["end_date"].astimezone(dt.timezone.utc).isoformat(),
             "bids": item.get("bid_count"),
+        }
+        added += 1
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=HISTORY_RETAIN_DAYS)
+    pruned = {}
+    for key, rec in history.items():
+        try:
+            if dt.datetime.fromisoformat(rec["end"]) >= cutoff:
+                pruned[key] = rec
+        except (ValueError, KeyError):
+            continue
+
+    log.info("History: %d new, %d total (%d pruned)",
+             added, len(pruned), len(history) - len(pruned))
+    return pruned
+
+
+def save_history(history: dict) -> None:
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "items": sorted(history.values(), key=lambda r: r["end"], reverse=True),
+    }
+    HISTORY_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    log.info("Archive written: %s (%d sales)", HISTORY_FILE, len(history))
+
+
+# =====================================================================
+# OUTPUT
+# =====================================================================
+# Python no longer renders finished HTML. It emits the data, and
+# template.html renders it in the browser - which is what makes search,
+# filtering, currency switching and the detail drawer possible at all.
+
+def summarise_sets(history: dict) -> list:
+    """Per-set stats over the archive: how many sold, what the middle of the
+    market looks like, and whether that has moved.
+
+    Median rather than mean, because one ¥345,000 certification card would
+    drag a mean well away from what a typical card in that set fetches."""
+    now = dt.datetime.now(dt.timezone.utc)
+    recent_cut = now - dt.timedelta(days=30)
+    prior_cut = now - dt.timedelta(days=60)
+
+    by_set = {}
+    for rec in history.values():
+        name = rec.get("set") or ""
+        if not name:
+            continue
+        try:
+            end = dt.datetime.fromisoformat(rec["end"])
+        except (ValueError, KeyError):
+            continue
+        by_set.setdefault(name, {"recent": [], "prior": [], "peak": 0})
+        b = by_set[name]
+        if end >= recent_cut:
+            b["recent"].append(rec["price"])
+            b["peak"] = max(b["peak"], rec["price"])
+        elif end >= prior_cut:
+            b["prior"].append(rec["price"])
+
+    out = []
+    for name, b in by_set.items():
+        if not b["recent"]:
+            continue
+        med = statistics.median(b["recent"])
+        # Needs a comparable prior period; too few points and the number is
+        # noise dressed up as a trend, so report nothing rather than mislead.
+        change = None
+        if len(b["prior"]) >= 3 and len(b["recent"]) >= 3:
+            prior_med = statistics.median(b["prior"])
+            if prior_med:
+                change = round((med - prior_med) / prior_med * 100)
+        out.append({
+            "name": name,
+            "count": len(b["recent"]),
+            "median": int(med),
+            "peak": b["peak"],
+            "change": change,
         })
+
+    out.sort(key=lambda s: s["count"], reverse=True)
+    return out
+
+
+def build_payload(all_items: dict, rate: float, history: dict = None) -> dict:
+    """Everything that qualifies, within the widest window, ranked by price."""
+    widest_hours = max(hours for _, hours, _ in WINDOWS)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=widest_hours)
+
+    # Draw from the archive, not just this run, so the board still shows a
+    # full month even if one scrape comes back thin.
+    source = history if history else {}
+    rows = []
+    for rec in source.values():
+        try:
+            end = dt.datetime.fromisoformat(rec["end"])
+        except (ValueError, KeyError):
+            continue
+        if end < cutoff:
+            continue
+        rows.append(rec)
 
     rows.sort(key=lambda r: r["price"], reverse=True)
     rows = rows[:PAYLOAD_CAP]
@@ -595,6 +714,8 @@ def build_payload(all_items: dict, rate: float) -> dict:
         "rate": rate,
         "windows": [{"label": label, "hours": hours} for label, hours, _ in WINDOWS],
         "items": rows,
+        "sets": summarise_sets(source),
+        "archive_size": len(source),
     }
 
 
@@ -633,7 +754,9 @@ def build(debug=False) -> None:
     all_items.update(collect_mercari())
     log.info("Combined unique listings: %d", len(all_items))
 
-    payload = build_payload(all_items, rate)
+    history = merge_history(load_history(), all_items)
+    save_history(history)
+    payload = build_payload(all_items, rate, history)
 
     OUTPUT_FILE.write_text(render_page(payload), encoding="utf-8")
     log.info("Wrote %s", OUTPUT_FILE.resolve())
