@@ -1,0 +1,77 @@
+name: Build and Publish Dashboard
+
+on:
+  schedule:
+    # Hourly. GitHub's scheduler is best-effort, so expect the occasional
+    # run to land 10-20 minutes late - fine for an hourly sales board.
+    - cron: '0 * * * *'
+  workflow_dispatch: {}
+  push:
+    branches: [main]        # republish whenever you tweak the script
+
+# Required for the deploy-pages action to publish.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# If a run is still going when the next hour ticks over, let it finish
+# rather than cancelling half-way through a scrape.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 mercari
+
+      - name: Build the dashboard
+        run: python dashboard.py
+
+      - name: Verify the build produced real data
+        # If Yahoo or Mercari blocks the runner, dashboard.py still writes a
+        # valid but nearly-empty page. Failing here means the previous
+        # deployment stays live instead of being replaced by an empty board.
+        run: |
+          python - <<'PY'
+          import sys, pathlib
+          html = pathlib.Path("index.html").read_text(encoding="utf-8")
+          rows = html.count('class="row"')
+          print(f"Rows in output: {rows}")
+          if rows < 5:
+              print("Too few rows - refusing to publish. Keeping the last good deploy.")
+              sys.exit(1)
+          PY
+
+      - name: Assemble the site folder
+        run: |
+          mkdir -p public
+          cp index.html public/
+          touch public/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
