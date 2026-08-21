@@ -64,29 +64,69 @@ except ImportError:
 # CONFIGURATION
 # =====================================================================
 
+# =====================================================================
+# SETS WE TRACK
+# =====================================================================
+# Each entry is (display label, [keywords that identify it]).
+# ORDER MATTERS: more specific entries come first, because "Berry Match IC"
+# also contains "Berry Match", and "Miracle Battle Carddass" also contains
+# "Carddass". The first match wins.
+#
+# This list does double duty: it decides what counts as a tracked card at
+# all (see is_wanted), and it labels each sale with its set on the board.
+
+SET_SIGNATURES = [
+    ("Berry Match IC",   ["ベリーマッチIC", "ベリーマッチアイス", "ベリマッチIC",
+                          "ベリーマッチＩＣ"]),
+    ("Berry Match W",    ["ベリーマッチW", "ベリーマッチＷ", "ベリーマッチダブル",
+                          "ベリマッチW"]),
+    ("Berry Match",      ["ベリーマッチ", "ベリマッチ", "バーストベリー"]),
+    ("Miracle Battle",   ["ミラクルバトルカードダス", "ミラバト",
+                          "ミラクルバトル"]),
+    ("J-Heroes",         ["Jヒーローズ", "J-HEROES", "JHEROES", "ジェイヒーローズ",
+                          "Ｊヒーローズ"]),
+    ("AR Formation",     ["ARカードダス", "ＡＲカードダス", "ARフォーメーション",
+                          "AR フォーメーション"]),
+    ("Hyper Battle",     ["ハイパーバトル"]),
+    ("Visual Adventure", ["ビジュアルアドベンチャー", "ヴィジュアルアドベンチャー"]),
+    ("OP Card Game",     ["旧ワンピースカード", "旧裏", "認定証", "WANTEDカード",
+                          "ライセンス", "ワンピースカードゲーム"]),
+    ("Data Carddass",    ["データカードダス"]),
+    ("Carddass",         ["カードダスマスターズ", "スペシャルパック", "カードダス"]),
+]
+
+# Flattened for quick membership checks.
+ALL_SET_KEYWORDS = [kw for _, kws in SET_SIGNATURES for kw in kws]
+
+
 SEARCH_QUERIES = [
-    # --- Carddass lines ---------------------------------------------
+    # --- Carddass / Hyper Battle / Visual Adventure ------------------
     "ワンピース カードダス",
     "ワンピース ハイパーバトル",
     "ONE PIECE ハイパーバトル",
-    "ワンピース カードダス キラ",
     "ワンピース ビジュアルアドベンチャー",
-    "ONE PIECE ビジュアルアドベンチャー",
+    "ワンピース カードダスマスターズ",
 
-    # --- Pre-2006 tournament / promo lines --------------------------
-    # These are the 2002 "ONE PIECE カードゲーム" (TV anime era) sets and
-    # their promos. Sellers rarely write "カードダス" on them, so the
-    # queries above miss them entirely. The collector term that separates
-    # this era from the modern (2022+) One Piece TCG is 旧裏 ("old back"),
-    # usually alongside 旧ワンピースカード.
+    # --- 2002-2005 One Piece Card Game (tournament / promo) ----------
     "ワンピース 旧裏",
     "旧ワンピースカード",
-    "ワンピース カード 認定証",        # license/certification tournament cards
+    "ワンピース カード 認定証",
     "ワンピース カードゲーム 2002",
-    "ワンピース カード 非売品",        # not-for-sale promos
-    "ワンピース 応募者全員サービス カード",   # mail-away promos
-    "ワンピース カード ジャンプフェスタ",
-    "ワンピース カードダス 当時物",
+
+    # --- Data Carddass: Berry Match family ---------------------------
+    "ワンピース ベリーマッチ",
+    "ワンピース ベリーマッチW",
+    "ワンピース ベリーマッチIC",
+    "データカードダス ワンピース",
+
+    # --- Miracle Battle Carddass / J-Heroes --------------------------
+    "ミラクルバトルカードダス ワンピース",
+    "ワンピース ミラバト キラ",
+    "ワンピース Jヒーローズ",
+
+    # --- AR Formation ------------------------------------------------
+    "ワンピース ARカードダス",
+    "ワンピース ARフォーメーション",
 ]
 
 # The three columns. (label, hours, how many to show)
@@ -98,17 +138,27 @@ WINDOWS = [
 
 MIN_PRICE_JPY = 3000
 
-NEGATIVE_KEYWORDS = [
+# --- Not a card at all ------------------------------------------------
+# Magazines are the big one: V Jump issues get sold in bulk as vehicles for
+# mail-in (応募) card offers, so they surface on card searches constantly
+# while being, in fact, magazines.
+NON_CARD_KEYWORDS = [
+    # print media
+    "特大号", "増刊", "月号", "雑誌", "書籍", "単行本", "攻略本", "ムック",
+    "写真集", "画集", "設定資料", "応募券", "応募用紙", "抽選券", "冊",
+    # other merchandise
+    "フィギュア", "ぬいぐるみ", "キーホルダー", "タオル", "Tシャツ",
+    "マグカップ", "クリアファイル", "下敷き", "文具", "食玩", "DVD",
+    "ブルーレイ", "ゲームソフト", "コスプレ",
+    # storage / equipment rather than cards
+    "ケース", "スリーブ", "バインダー", "ファイル", "自販機", "本体", "空箱",
+    # reproductions
     "複製", "コピー", "リメイク", "自作", "非公式",
-    "ケース", "スリーブ", "ファイル", "バインダー",
-    "ポスター", "シール", "ステッカー",
 ]
 
 # --- Modern-era exclusion -------------------------------------------
-# The 2022+ ONE PIECE Card Game sits in the same Mercari category, uses
-# similar wording, and sells at similar prices - without this filter the
-# broad vintage queries above flood the board with OP13-118 手配書 cards.
-# Trim this list if it ever excludes something you actually want.
+# The 2022+ ONE PIECE Card Game shares category and price range with the
+# vintage material and would otherwise flood the board.
 MODERN_TCG_KEYWORDS = [
     "手配書", "パラレル", "リーダー", "シークレット",
     "ロマンスドーン", "頂上決戦", "強大な敵", "謀略の王国",
@@ -299,6 +349,7 @@ def parse_results(page_html: str) -> list:
             "url": url,
             "source": "marketplace" if is_flea else "auction",
             "card_number": extract_card_number(title),
+            "set_name": identify_set(title),
             "image_url": raw.get("imageUrl") or "",
             "end_date": parse_end_time(raw.get("endTime")),
             "bid_count": raw.get("bidCount"),
@@ -306,20 +357,35 @@ def parse_results(page_html: str) -> list:
     return items
 
 
+def identify_set(title: str) -> str:
+    """Return the display label of the first matching set, or '' if the
+    title doesn't look like any set we track."""
+    for label, keywords in SET_SIGNATURES:
+        if any(kw in title for kw in keywords):
+            return label
+    return ""
+
+
 def is_wanted(item: dict) -> bool:
     title = item["title"]
 
     if item["price_jpy"] < MIN_PRICE_JPY:
         return False
-    if any(bad in title for bad in NEGATIVE_KEYWORDS):
+
+    # Not a card - magazines, merch, storage, repros.
+    if any(bad in title for bad in NON_CARD_KEYWORDS):
         return False
 
-    # Keep the board vintage-only: drop the modern (2022+) One Piece TCG,
-    # which shares the same category and price range and would otherwise
-    # dominate results from the broader vintage queries.
+    # Drop the modern (2022+) One Piece TCG.
     if MODERN_CODE_RE.search(title):
         return False
     if any(modern in title for modern in MODERN_TCG_KEYWORDS):
+        return False
+
+    # Positive requirement: it must look like one of the sets we track.
+    # This is what keeps V Jump magazine lots and other stray listings off
+    # the board - they match no set signature, so they never qualify.
+    if not item.get("set_name"):
         return False
 
     return True
@@ -450,6 +516,7 @@ def normalise_mercari_item(raw):
             "url": url or f"https://jp.mercari.com/item/{item_id}",
             "source": "mercari",
             "card_number": extract_card_number(title),
+            "set_name": identify_set(title),
             "image_url": getattr(raw, "imageURL", "") or "",
             "end_date": end_date,
             "bid_count": bid_count,
@@ -493,11 +560,16 @@ def render_html(buckets: dict, rate: float) -> str:
     def render_item(item, rank):
         usd = item["price_jpy"] * rate
         tag, tag_class = SOURCE_LABELS.get(item.get("source"), ("Listing", "auction"))
+        # Yahoo Flea listings are fixed-price and have no bidding, even
+        # though the feed sometimes carries a stray bidCount.
         bids = item.get("bid_count")
-        bid_str = f"&nbsp;&middot;&nbsp;{bids} bids" if bids else ""
+        show_bids = bids and item.get("source") != "marketplace"
+        bid_str = f"&nbsp;&middot;&nbsp;{bids} bids" if show_bids else ""
         date_str = f"{item['end_date']:%d %b}" if item["end_date"] else "&mdash;"
         card = item.get("card_number")
         card_html = f'<span class="chip">{html.escape(card)}</span>' if card else ""
+        set_name = item.get("set_name")
+        set_html = f'<span class="chip set">{html.escape(set_name)}</span>' if set_name else ""
         img = html.escape(item.get("image_url") or "")
         img_html = (f'<img src="{img}" alt="" loading="lazy">' if img
                     else '<span class="ph"></span>')
@@ -509,7 +581,7 @@ def render_html(buckets: dict, rate: float) -> str:
             <span class="info">
               <span class="price">&yen;{item['price_jpy']:,}<span class="usd">${usd:,.0f}</span></span>
               <span class="name">{html.escape(item['title'][:110])}</span>
-              <span class="meta"><span class="tag {tag_class}">{tag}</span>{card_html}<span class="when">{date_str}{bid_str}</span></span>
+              <span class="meta"><span class="tag {tag_class}">{tag}</span>{set_html}{card_html}<span class="when">{date_str}{bid_str}</span></span>
             </span>
             <span class="chev">&rsaquo;</span>
           </a>"""
@@ -700,6 +772,10 @@ def render_html(buckets: dict, rate: float) -> str:
     border-radius:5px; padding:1.5px 6px;
     font-family:ui-monospace,"SF Mono",Menlo,monospace;
   }}
+  .chip.set {{
+    font-family:inherit; font-weight:600; color:var(--ink-2);
+    background:transparent; box-shadow:inset 0 0 0 1px var(--hair);
+  }}
   .when {{ font-size:11.5px; color:var(--ink-3); }}
 
   .chev {{
@@ -721,9 +797,7 @@ def render_html(buckets: dict, rate: float) -> str:
   <header class="head">
     <p class="kicker">Market Tracker</p>
     <h1>One Piece Card Sales</h1>
-    <p class="sub">Realised prices for pre-2006 One Piece cards &mdash; Carddass,
-       Hyper Battle, Visual Adventure and \u65e7\u88cf tournament and promo cards \u2014
-       across Yahoo! Auctions, Yahoo!\u30d5\u30ea\u30de and Mercari.</p>
+    <p class="sub">Realised prices for Bandai One Piece card sets \u2014 Carddass, Hyper Battle, Visual Adventure, the 2002\u201305 card game, Berry Match, Miracle Battle, J-Heroes and AR Formation.</p>
     <div class="stamp"><span class="pip"></span>Updated {now_local:%-d %b, %-I:%M %p}
        &middot; refreshes hourly</div>
   </header>
