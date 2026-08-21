@@ -172,7 +172,11 @@ MODERN_CODE_RE = re.compile(r"\b(?:OP|ST|EB|PRB)\d{2}[-–]\d{2,3}\b", re.IGNORE
 # Pages per query, per sort mode. Time-sorted covers "recent"; price-sorted
 # reaches back for the big-ticket sales that fill the week/month columns.
 PAGES_TIME_SORTED = 2
-PAGES_PRICE_SORTED = 3
+PAGES_PRICE_SORTED = 2
+# The high-value sweep: only sales at or above this figure. This is the pass
+# that catches expensive listings a recency-first crawl would never reach.
+PAGES_VALUE_SWEEP = 3
+HIGH_VALUE_FLOOR_JPY = 15000
 RESULTS_PER_PAGE = 50
 
 REQUEST_DELAY_SEC = 4.0
@@ -195,6 +199,11 @@ MERCARI_MAX_PER_QUERY = 80
 MERCARI_DELAY_SEC = 3.0
 
 OUTPUT_FILE = Path("index.html")
+TEMPLATE_FILE = Path("template.html")
+DATA_PLACEHOLDER = "/*__DATA__*/"
+# Cap the inlined payload so the page stays light. The front end filters
+# and sorts client-side, so this is the pool it works from.
+PAYLOAD_CAP = 400
 LOOP_INTERVAL_MIN = 60
 
 BASE_URL = "https://auctions.yahoo.co.jp/closedsearch/closedsearch"
@@ -257,8 +266,14 @@ def build_session() -> requests.Session:
     return s
 
 
-def fetch_page(session, query: str, page: int, sort_by: str, debug=False) -> str:
-    """sort_by: 'end' (most recently closed) or 'price' (highest first)."""
+def fetch_page(session, query: str, page: int, sort_by: str,
+               min_price: int = 0, debug=False) -> str:
+    """sort_by: 'end' (most recently closed) or 'price' (highest first).
+
+    min_price restricts the RESULT SET to sales at or above that figure,
+    using the price_type/min parameters Yahoo uses on its own pages. This
+    is what guarantees big-ticket sales surface: sorting alone can't be
+    relied on, but a filtered result set can."""
     sort_key = "cbids" if sort_by == "price" else "end"
     params = {
         "p": query,
@@ -268,6 +283,9 @@ def fetch_page(session, query: str, page: int, sort_by: str, debug=False) -> str
         "s1": sort_key,
         "o1": "d",
     }
+    if min_price:
+        params["price_type"] = "currentprice"
+        params["min"] = min_price
     url = f"{BASE_URL}?{urlencode(params)}"
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -394,13 +412,24 @@ def is_wanted(item: dict) -> bool:
 def collect_yahoo(session, debug=False) -> dict:
     """Scrape Yahoo Auctions / Yahoo!フリマ; return {item_id: item}."""
     merged = {}
-    plan = [("end", PAGES_TIME_SORTED), ("price", PAGES_PRICE_SORTED)]
+    # Three passes, because no single one is sufficient:
+    #   recent - full coverage of the last day, cheap items included
+    #   value  - result set restricted to high-value sales, so a big sale
+    #            from a week ago can't be buried under newer cheap ones
+    #   price  - price-sorted sweep as a belt-and-braces third angle
+    plan = [
+        ("end",   PAGES_TIME_SORTED,  0),
+        ("end",   PAGES_VALUE_SWEEP,  HIGH_VALUE_FLOOR_JPY),
+        ("price", PAGES_PRICE_SORTED, 0),
+    ]
 
     for query in SEARCH_QUERIES:
-        for sort_by, n_pages in plan:
+        for sort_by, n_pages, floor in plan:
             for page in range(1, n_pages + 1):
-                log.info("Yahoo: %s (%s-sorted, page %d)", query, sort_by, page)
-                found = parse_results(fetch_page(session, query, page, sort_by, debug))
+                tag = f"{sort_by}-sorted" + (f", ≥¥{floor:,}" if floor else "")
+                log.info("Yahoo: %s (%s, page %d)", query, tag, page)
+                found = parse_results(
+                    fetch_page(session, query, page, sort_by, floor, debug))
                 log.info("  parsed %d listings", len(found))
                 for item in found:
                     merged.setdefault(item["auction_id"], item)
@@ -526,293 +555,69 @@ def normalise_mercari_item(raw):
         return None
 
 
-def bucket_by_window(all_items: dict) -> dict:
-    """Split into the three time windows, each ranked by price."""
-    now = dt.datetime.now(dt.timezone.utc)
-    buckets = {}
-
-    for label, hours, top_n in WINDOWS:
-        cutoff = now - dt.timedelta(hours=hours)
-        matching = [
-            item for item in all_items.values()
-            if is_wanted(item) and item["end_date"] and item["end_date"] >= cutoff
-        ]
-        matching.sort(key=lambda i: i["price_jpy"], reverse=True)
-        buckets[label] = matching[:top_n]
-        log.info("%s: %d qualifying, showing %d", label, len(matching), len(buckets[label]))
-
-    return buckets
-
-
 # =====================================================================
-# HTML OUTPUT
+# OUTPUT
 # =====================================================================
+# Python no longer renders finished HTML. It emits the data, and
+# template.html renders it in the browser - which is what makes search,
+# filtering, currency switching and the detail drawer possible at all.
 
-def render_html(buckets: dict, rate: float) -> str:
-    now_local = dt.datetime.now()
+def build_payload(all_items: dict, rate: float) -> dict:
+    """Everything that qualifies, within the widest window, ranked by price."""
+    widest_hours = max(hours for _, hours, _ in WINDOWS)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=widest_hours)
 
-    SOURCE_LABELS = {
-        "auction": ("Yahoo Auction", "auction"),
-        "marketplace": ("Yahoo Flea", "market"),
-        "mercari": ("Mercari", "mercari"),
+    rows = []
+    for item in all_items.values():
+        if not is_wanted(item):
+            continue
+        if not item["end_date"] or item["end_date"] < cutoff:
+            continue
+        rows.append({
+            "id": item["auction_id"],
+            "title": item["title"],
+            "price": item["price_jpy"],
+            "url": item["url"],
+            "source": item["source"],
+            "set": item.get("set_name") or "",
+            "card": item.get("card_number") or "",
+            "image": item.get("image_url") or "",
+            "end": item["end_date"].astimezone(dt.timezone.utc).isoformat(),
+            "bids": item.get("bid_count"),
+        })
+
+    rows.sort(key=lambda r: r["price"], reverse=True)
+    rows = rows[:PAYLOAD_CAP]
+
+    log.info("Payload: %d items", len(rows))
+    return {
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "rate": rate,
+        "windows": [{"label": label, "hours": hours} for label, hours, _ in WINDOWS],
+        "items": rows,
     }
 
-    def render_item(item, rank):
-        usd = item["price_jpy"] * rate
-        tag, tag_class = SOURCE_LABELS.get(item.get("source"), ("Listing", "auction"))
-        # Yahoo Flea listings are fixed-price and have no bidding, even
-        # though the feed sometimes carries a stray bidCount.
-        bids = item.get("bid_count")
-        show_bids = bids and item.get("source") != "marketplace"
-        bid_str = f"&nbsp;&middot;&nbsp;{bids} bids" if show_bids else ""
-        date_str = f"{item['end_date']:%d %b}" if item["end_date"] else "&mdash;"
-        card = item.get("card_number")
-        card_html = f'<span class="chip">{html.escape(card)}</span>' if card else ""
-        set_name = item.get("set_name")
-        set_html = f'<span class="chip set">{html.escape(set_name)}</span>' if set_name else ""
-        img = html.escape(item.get("image_url") or "")
-        img_html = (f'<img src="{img}" alt="" loading="lazy">' if img
-                    else '<span class="ph"></span>')
 
-        return f"""
-          <a class="row" href="{html.escape(item['url'])}" target="_blank" rel="noopener">
-            <span class="rank{' top' if rank <= 3 else ''}">{rank}</span>
-            <span class="thumb">{img_html}</span>
-            <span class="info">
-              <span class="price">&yen;{item['price_jpy']:,}<span class="usd">${usd:,.0f}</span></span>
-              <span class="name">{html.escape(item['title'][:110])}</span>
-              <span class="meta"><span class="tag {tag_class}">{tag}</span>{set_html}{card_html}<span class="when">{date_str}{bid_str}</span></span>
-            </span>
-            <span class="chev">&rsaquo;</span>
-          </a>"""
+def render_page(payload: dict) -> str:
+    """Inject the payload into template.html.
 
-    columns = []
-    for label, hours, _ in WINDOWS:
-        items = buckets.get(label, [])
-        subtotal = sum(i["price_jpy"] for i in items)
-        peak = max((i["price_jpy"] for i in items), default=0)
-        rows = "".join(render_item(it, n) for n, it in enumerate(items, 1))
-        if not rows:
-            rows = '<div class="empty">Nothing sold in this window</div>'
-        columns.append(f"""
-        <section class="col">
-          <div class="col-head">
-            <h2>{html.escape(label)}</h2>
-            <div class="figures">
-              <span class="fig"><em>&yen;{peak:,}</em><small>Peak</small></span>
-              <span class="rule"></span>
-              <span class="fig"><em>&yen;{subtotal:,}</em><small>Volume</small></span>
-              <span class="rule"></span>
-              <span class="fig"><em>{len(items)}</em><small>Sales</small></span>
-            </div>
-          </div>
-          <div class="rows">{rows}</div>
-        </section>""")
+    The data is inlined rather than fetched, so the page works when opened
+    straight off disk (a fetch() would be blocked by CORS on file://) as
+    well as when hosted."""
+    if not TEMPLATE_FILE.exists():
+        raise FileNotFoundError(
+            f"{TEMPLATE_FILE} not found. It must sit alongside dashboard.py."
+        )
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{LOOP_INTERVAL_MIN * 60}">
-<meta name="color-scheme" content="light dark">
-<title>One Piece Card Sales</title>
-<style>
-  :root {{
-    --bg:#fbfbfd;
-    --surface:#ffffff;
-    --ink:#1d1d1f;
-    --ink-2:#6e6e73;
-    --ink-3:#a1a1a6;
-    --hair:rgba(0,0,0,.08);
-    --hover:rgba(0,0,0,.022);
-    --accent:#0071e3;
-    --market:#8944ab;
-    --mercari:#d0342c;
-    --shadow:0 4px 20px rgba(0,0,0,.05);
-    --radius:18px;
-  }}
-  @media (prefers-color-scheme: dark) {{
-    :root {{
-      --bg:#000000;
-      --surface:#1c1c1e;
-      --ink:#f5f5f7;
-      --ink-2:#a1a1a6;
-      --ink-3:#6e6e73;
-      --hair:rgba(255,255,255,.1);
-      --hover:rgba(255,255,255,.04);
-      --accent:#2997ff;
-      --market:#bf5af2;
-      --mercari:#ff6961;
-      --shadow:none;
-    }}
-  }}
+    template = TEMPLATE_FILE.read_text(encoding="utf-8")
+    if DATA_PLACEHOLDER not in template:
+        raise ValueError(f"{TEMPLATE_FILE} is missing the {DATA_PLACEHOLDER} marker.")
 
-  * {{ box-sizing:border-box; }}
-  html {{ -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; }}
-  body {{
-    margin:0; background:var(--bg); color:var(--ink);
-    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",
-                "Helvetica Neue",Helvetica,Arial,sans-serif;
-    font-size:15px; line-height:1.47;
-    font-variant-numeric:tabular-nums;
-  }}
-  .wrap {{ max-width:1240px; margin:0 auto; padding:72px 24px 88px; }}
+    # ensure_ascii keeps the JSON free of raw "</script>" and stray unicode
+    # that could terminate the script block early.
+    blob = json.dumps(payload, ensure_ascii=True).replace("<", "\\u003c")
+    return template.replace(DATA_PLACEHOLDER, blob)
 
-  /* ---------- header ---------- */
-  .head {{ text-align:center; margin-bottom:52px; }}
-  .kicker {{
-    font-size:12px; font-weight:600; letter-spacing:.02em;
-    color:var(--accent); margin:0 0 10px;
-  }}
-  h1 {{
-    font-size:52px; font-weight:600; letter-spacing:-.025em;
-    line-height:1.06; margin:0 0 14px;
-  }}
-  .sub {{
-    font-size:19px; color:var(--ink-2); margin:0 auto; max-width:600px;
-    letter-spacing:-.01em; font-weight:400;
-  }}
-  .stamp {{
-    display:inline-flex; align-items:center;
-    margin-top:22px; font-size:13px; color:var(--ink-3);
-  }}
-  .pip {{
-    width:6px; height:6px; border-radius:50%; background:#30d158; margin-right:8px;
-    animation:breathe 2.6s ease-in-out infinite;
-  }}
-  @keyframes breathe {{ 0%,100%{{opacity:1}} 50%{{opacity:.3}} }}
-
-  /* ---------- columns ---------- */
-  .grid {{ display:flex; align-items:flex-start; margin-right:-22px; }}
-  .col {{
-    flex:1 1 0; min-width:0; margin-right:22px;
-    background:var(--surface); border-radius:var(--radius);
-    box-shadow:var(--shadow); overflow:hidden;
-  }}
-  @media (max-width:940px) {{
-    .grid {{ flex-direction:column; margin-right:0; }}
-    .col {{ width:100%; margin-right:0; margin-bottom:22px; }}
-    h1 {{ font-size:38px; }}
-    .sub {{ font-size:17px; }}
-    .wrap {{ padding:48px 18px 64px; }}
-  }}
-
-  .col-head {{ padding:26px 26px 20px; border-bottom:1px solid var(--hair); }}
-  .col-head h2 {{
-    font-size:21px; font-weight:600; letter-spacing:-.015em; margin:0 0 16px;
-  }}
-  .figures {{ display:flex; align-items:center; }}
-  .fig {{ display:flex; flex-direction:column; min-width:0; margin-right:16px; }}
-  .fig em {{
-    font-style:normal; font-size:15px; font-weight:600;
-    letter-spacing:-.01em; white-space:nowrap;
-  }}
-  .fig small {{
-    font-size:11px; font-weight:400; color:var(--ink-3); letter-spacing:.01em;
-  }}
-  .rule {{ width:1px; align-self:stretch; background:var(--hair); margin-right:16px; }}
-
-  /* ---------- rows ---------- */
-  .rows {{ padding:4px 6px 6px; }}
-  .row {{
-    display:flex; align-items:center; position:relative;
-    padding:10px 14px; border-radius:10px;
-    text-decoration:none; color:inherit;
-    transition:background .18s ease;
-  }}
-  /* Hairline between rows, inset past the thumbnail so it reads as a list
-     rather than a table. Long columns need this to stay scannable. */
-  .row + .row::before {{
-    content:""; position:absolute; left:14px; right:14px; top:0;
-    height:1px; background:var(--hair);
-  }}
-  .row:hover {{ background:var(--hover); }}
-  .row:hover::before, .row:hover + .row::before {{ background:transparent; }}
-  .row:hover .chev {{ opacity:.55; transform:translateX(2px); }}
-
-  .rank {{
-    flex:0 0 18px; text-align:center; margin-right:12px;
-    font-size:12px; font-weight:500; color:var(--ink-3);
-    font-variant-numeric:tabular-nums;
-  }}
-  .rank.top {{ color:var(--ink); font-weight:600; }}
-  .thumb {{ flex:0 0 46px; margin-right:13px; }}
-  .thumb img, .ph {{
-    width:46px; height:46px; border-radius:9px; display:block;
-    object-fit:cover; background:var(--hover);
-    box-shadow:inset 0 0 0 1px var(--hair);
-  }}
-
-  .info {{ flex:1; min-width:0; display:flex; flex-direction:column; }}
-  .info > * {{ margin-bottom:3px; }}
-  .info > *:last-child {{ margin-bottom:0; }}
-  .price {{
-    font-size:15.5px; font-weight:600; letter-spacing:-.015em;
-    display:flex; align-items:baseline;
-  }}
-  .usd {{
-    font-size:12px; font-weight:400; color:var(--ink-3);
-    letter-spacing:0; margin-left:8px;
-  }}
-  .name {{
-    font-size:12.5px; color:var(--ink-2); line-height:1.35;
-    display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical;
-    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  }}
-  .meta {{ display:flex; align-items:center; margin-top:2px; flex-wrap:wrap; }}
-  .meta > * {{ margin-right:8px; }}
-  .meta > *:last-child {{ margin-right:0; }}
-  .tag {{ font-size:11px; font-weight:500; color:var(--accent); }}
-  .tag.market {{ color:var(--market); }}
-  .tag.mercari {{ color:var(--mercari); }}
-  .chip {{
-    font-size:10.5px; font-weight:500; color:var(--ink-2);
-    background:var(--hover); box-shadow:inset 0 0 0 1px var(--hair);
-    border-radius:5px; padding:1.5px 6px;
-    font-family:ui-monospace,"SF Mono",Menlo,monospace;
-  }}
-  .chip.set {{
-    font-family:inherit; font-weight:600; color:var(--ink-2);
-    background:transparent; box-shadow:inset 0 0 0 1px var(--hair);
-  }}
-  .when {{ font-size:11.5px; color:var(--ink-3); }}
-
-  .chev {{
-    flex:0 0 auto; font-size:19px; color:var(--ink-3);
-    opacity:0; transition:opacity .18s ease, transform .18s ease;
-  }}
-  .empty {{ padding:44px 20px; text-align:center; color:var(--ink-3); font-size:14px; }}
-
-  /* ---------- footer ---------- */
-  footer {{
-    margin-top:44px; padding-top:26px; border-top:1px solid var(--hair);
-    text-align:center; font-size:12px; color:var(--ink-3); line-height:1.8;
-  }}
-</style>
-</head>
-<body>
-<div class="wrap">
-
-  <header class="head">
-    <p class="kicker">Market Tracker</p>
-    <h1>One Piece Card Sales</h1>
-    <p class="sub">Realised prices for Bandai One Piece card sets \u2014 Carddass, Hyper Battle, Visual Adventure, the 2002\u201305 card game, Berry Match, Miracle Battle, J-Heroes and AR Formation.</p>
-    <div class="stamp"><span class="pip"></span>Updated {now_local:%-d %b, %-I:%M %p}
-       &middot; refreshes hourly</div>
-  </header>
-
-  <div class="grid">{"".join(columns)}</div>
-
-  <footer>
-    Every figure is a completed sale, from Yahoo! Auctions, Yahoo!\u30d5\u30ea\u30de and Mercari JP.<br>
-    Select any row to open the original listing.<br>
-    1 JPY = {rate:.6f} USD
-  </footer>
-
-</div>
-</body>
-</html>"""
 
 # =====================================================================
 # MAIN
@@ -828,9 +633,9 @@ def build(debug=False) -> None:
     all_items.update(collect_mercari())
     log.info("Combined unique listings: %d", len(all_items))
 
-    buckets = bucket_by_window(all_items)
+    payload = build_payload(all_items, rate)
 
-    OUTPUT_FILE.write_text(render_html(buckets, rate), encoding="utf-8")
+    OUTPUT_FILE.write_text(render_page(payload), encoding="utf-8")
     log.info("Wrote %s", OUTPUT_FILE.resolve())
     log.info("=== Build finished ===")
 
