@@ -271,6 +271,38 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
 
 footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;font-size:11.5px;color:var(--ink-3);line-height:1.9}
 
+
+/* ============================================================
+   MARKET BY SET
+   Median, not mean: one certification card at ¥345,000 would drag
+   an average far away from what a typical card in that set fetches.
+   ============================================================ */
+.pulse{margin-bottom:14px}
+.pulse-head{display:flex;align-items:baseline;justify-content:space-between;margin:0 0 11px;padding:0 2px}
+.pulse-head h2{font-family:var(--display);font-size:16px;font-weight:700;margin:0;letter-spacing:-.01em}
+.pulse-note{font-size:11.5px;color:var(--ink-3)}
+.pulse-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -2px;padding:0 2px 3px}
+.pulse-grid{display:flex;gap:9px;min-width:min-content}
+.stat{
+  flex:0 0 152px;background:var(--card);border-radius:13px;padding:13px 14px;
+  box-shadow:var(--shadow);cursor:pointer;text-align:left;
+  transition:transform .16s ease;
+}
+.stat:hover{transform:translateY(-2px)}
+.stat[aria-pressed="true"]{box-shadow:0 0 0 1.5px var(--accent),var(--shadow)}
+.stat-name{font-size:11px;font-weight:700;color:var(--ink-2);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat-med{font-size:19px;font-weight:700;letter-spacing:-.015em;line-height:1}
+.stat-sub{display:flex;align-items:center;gap:7px;margin-top:7px;font-size:10.5px;color:var(--ink-3)}
+.delta{font-weight:700}
+.delta.up{color:#16a34a}
+.delta.down{color:#dc2626}
+[data-theme="dark"] .delta.up{color:#4ade80}
+[data-theme="dark"] .delta.down{color:#f87171}
+
+.toolbar-extra{display:flex;gap:9px;align-items:center;margin-left:auto}
+.link-btn{font-size:12px;font-weight:500;color:var(--ink-3)}
+.link-btn:hover{color:var(--accent)}
+
 /* ============================================================
    MOBILE
    The desktop board compares three windows side by side. On a phone
@@ -315,6 +347,9 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
   .tabs{display:flex;width:100%;margin-top:10px}
   .tabs button{flex:1;text-align:center;padding:9px 6px;font-size:12px}
 
+  .pulse-head h2{font-size:14.5px}
+  .stat{flex:0 0 136px;padding:11px 12px}
+  .stat-med{font-size:17px}
   .board{flex-direction:column;gap:0;padding-bottom:40px}
   /* flex:1 1 0 sizes WIDTH in a row, but collapses HEIGHT to zero once the
      board stacks vertically - which clipped every row out of existence.
@@ -357,11 +392,19 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
 <div class="wrap">
   <header class="masthead">
     <p class="eyebrow">Bandai · 2000–2015</p>
-    <h1>One Piece Card Market<span class="jp">旧ワンピースカード 落札相場</span></h1>
+    <h1>One Piece Card Market<span class="jp">Vintage One Piece Sales Tracker</span></h1>
     <div class="stamp"><span class="pip"></span><span id="stamp-text"></span></div>
   </header>
 
   <section id="featured"></section>
+
+  <section class="pulse" id="pulse" hidden>
+    <div class="pulse-head">
+      <h2>Market by set</h2>
+      <span class="pulse-note" id="pulse-note"></span>
+    </div>
+    <div class="pulse-scroll"><div class="pulse-grid" id="pulse-grid"></div></div>
+  </section>
 
   <div class="controls" id="controls">
     <div class="controls-row">
@@ -381,6 +424,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
       <button class="filter-toggle" id="filter-toggle" aria-expanded="false">
         Filters<span class="badge" id="filter-count" hidden></span>
       </button>
+      <button class="link-btn" id="export">Export CSV</button>
       <button class="icon-btn" id="theme" aria-label="Switch between light and dark">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
       </button>
@@ -412,6 +456,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
   var items = DATA.items || [];
   var windows = DATA.windows || [];
   var rate = DATA.rate || 0.0064;
+  var setStats = DATA.sets || [];
 
   var state = {
     q:"", sets:new Set(), sources:new Set(),
@@ -561,6 +606,84 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
     }).join("");
   }
 
+  /* ---------- market by set ---------- */
+  function renderPulse(){
+    var host = document.getElementById("pulse");
+    if(!setStats.length){ host.hidden = true; return; }
+    host.hidden = false;
+
+    var anyChange = setStats.some(function(s){ return s.change !== null; });
+    document.getElementById("pulse-note").textContent = anyChange
+      ? "Median sale price · last 30 days"
+      : "Median sale price · 30d change appears once there is a month of history";
+
+    document.getElementById("pulse-grid").innerHTML = setStats.map(function(s){
+      var d = "";
+      if(s.change !== null && s.change !== undefined){
+        var cls = s.change > 0 ? "up" : (s.change < 0 ? "down" : "");
+        var sign = s.change > 0 ? "+" : "";
+        d = '<span class="delta '+cls+'">'+sign+s.change+'%</span>';
+      }
+      return '<button class="stat" data-set="'+esc(s.name)+'" aria-pressed="'+state.sets.has(s.name)+'">' +
+        '<div class="stat-name">'+esc(s.name)+'</div>' +
+        '<div class="stat-med">'+price(s.median)+'</div>' +
+        '<div class="stat-sub">'+d+'<span>'+s.count+' sold</span></div>' +
+      '</button>';
+    }).join("");
+  }
+
+  /* ---------- shareable state ---------- */
+  function writeHash(){
+    var p = [];
+    if(state.q) p.push("q=" + encodeURIComponent(state.q));
+    if(state.sets.size) p.push("set=" + encodeURIComponent([].concat(Array.from(state.sets)).join("|")));
+    if(state.sources.size) p.push("src=" + Array.from(state.sources).join("|"));
+    if(state.sort !== "price") p.push("sort=" + state.sort);
+    if(state.cur !== "jpy") p.push("cur=" + state.cur);
+    history.replaceState(null, "", p.length ? "#" + p.join("&") : location.pathname);
+  }
+  function readHash(){
+    if(!location.hash) return;
+    location.hash.slice(1).split("&").forEach(function(pair){
+      var kv = pair.split("="), k = kv[0], v = decodeURIComponent(kv[1] || "");
+      if(k === "q"){ state.q = v; document.getElementById("search").value = v; }
+      else if(k === "set"){ v.split("|").filter(Boolean).forEach(function(s){ state.sets.add(s); }); }
+      else if(k === "src"){ v.split("|").filter(Boolean).forEach(function(s){ state.sources.add(s); }); }
+      else if(k === "sort" && v === "recent"){ state.sort = "recent"; }
+      else if(k === "cur" && v === "usd"){ state.cur = "usd"; }
+    });
+    document.querySelectorAll("[data-sort]").forEach(function(b){
+      b.setAttribute("aria-pressed", b.dataset.sort === state.sort); });
+    document.querySelectorAll("[data-cur]").forEach(function(b){
+      b.setAttribute("aria-pressed", b.dataset.cur === state.cur); });
+  }
+
+  /* ---------- CSV ---------- */
+  document.getElementById("export").addEventListener("click", function(){
+    var rows = items.filter(matches);
+    var head = ["sold_date","price_jpy","price_usd","set","card_number","source","bids","title","url"];
+    var csv = [head.join(",")].concat(rows.map(function(it){
+      return [
+        it.end || "",
+        it.price,
+        Math.round(it.price * rate),
+        it.set || "",
+        it.card || "",
+        SOURCE_LABEL[it.source] || it.source,
+        (it.bids && it.source !== "marketplace") ? it.bids : "",
+        '"' + String(it.title).replace(/"/g,'""') + '"',
+        it.url
+      ].join(",");
+    })).join("\n");
+
+    var blob = new Blob(["\ufeff" + csv], {type:"text/csv;charset=utf-8"});
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "one-piece-sales-" + new Date().toISOString().slice(0,10) + ".csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
   /* ---------- drawer ---------- */
   var lastFocus = null;
   function openDrawer(id){
@@ -608,20 +731,20 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
 
     if(t.dataset.set !== undefined){
       state.sets.has(t.dataset.set) ? state.sets.delete(t.dataset.set) : state.sets.add(t.dataset.set);
-      renderChips(); renderFilterCount(); refresh();
+      renderChips(); renderFilterCount(); renderPulse(); writeHash(); refresh();
     } else if(t.dataset.source !== undefined){
       state.sources.has(t.dataset.source) ? state.sources.delete(t.dataset.source) : state.sources.add(t.dataset.source);
-      renderChips(); renderFilterCount(); refresh();
+      renderChips(); renderFilterCount(); renderPulse(); writeHash(); refresh();
     } else if(t.dataset.sort){
       state.sort = t.dataset.sort;
       t.parentNode.querySelectorAll("button").forEach(function(b){
         b.setAttribute("aria-pressed", b === t); });
-      refresh();
+      refresh(); writeHash();
     } else if(t.dataset.cur){
       state.cur = t.dataset.cur;
       t.parentNode.querySelectorAll("button").forEach(function(b){
         b.setAttribute("aria-pressed", b === t); });
-      refresh(); renderFooter();
+      refresh(); renderPulse(); renderFooter(); writeHash();
     } else if(t.dataset.tab !== undefined){
       state.tab = +t.dataset.tab; renderTabs(); renderBoard();
     } else if(t.dataset.more !== undefined){
@@ -629,7 +752,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
     } else if(t.hasAttribute("data-clear")){
       state.sets.clear(); state.sources.clear(); state.q = "";
       document.getElementById("search").value = "";
-      renderChips(); renderFilterCount(); refresh();
+      renderChips(); renderFilterCount(); renderPulse(); writeHash(); refresh();
     } else if(t.hasAttribute("data-close")){
       closeDrawer();
     } else if(t.dataset.copy){
@@ -645,7 +768,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
   document.getElementById("search").addEventListener("input", function(e){
     clearTimeout(debounce);
     var v = e.target.value.toLowerCase().trim();
-    debounce = setTimeout(function(){ state.q = v; refresh(); }, 130);
+    debounce = setTimeout(function(){ state.q = v; refresh(); writeHash(); }, 130);
   });
 
   document.getElementById("scrim").addEventListener("click", closeDrawer);
@@ -696,7 +819,9 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
     document.documentElement.setAttribute("data-theme","dark");
   }
 
-  renderStamp(); renderFooter(); renderChips(); renderTabs(); renderFilterCount(); refresh();
+  readHash();
+  renderStamp(); renderFooter(); renderChips(); renderTabs();
+  renderFilterCount(); renderPulse(); refresh();
 })();
 </script>
 </body>
