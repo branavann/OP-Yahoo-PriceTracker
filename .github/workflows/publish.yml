@@ -9,14 +9,11 @@ on:
   push:
     branches: [main]        # republish whenever you tweak the script
 
-# Required for the deploy-pages action to publish.
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# If a run is still going when the next hour ticks over, let it finish
-# rather than cancelling half-way through a scrape.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -26,33 +23,62 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install requests beautifulsoup4 mercari
+      - name: Install core dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Install Mercari support (optional)
+        # dashboard.py degrades gracefully to Yahoo-only if this is missing,
+        # so a failure here must not sink the whole build.
+        continue-on-error: true
+        run: pip install mercari
+
+      - name: Show environment
+        run: |
+          python --version
+          pip list
 
       - name: Build the dashboard
-        run: python dashboard.py
+        run: |
+          set -o pipefail
+          python dashboard.py 2>&1 | tee build.log
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          echo "===== per-source counts ====="
+          grep -E "unique listings|qualifying|Mercari|not installed|failed" build.log || echo "(no matching log lines)"
+          echo
+          echo "===== output file ====="
+          if [ -f index.html ]; then
+            echo "index.html size: $(wc -c < index.html) bytes"
+            echo "row count: $(grep -o 'class=\"row\"' index.html | wc -l)"
+          else
+            echo "index.html was never created"
+          fi
+          echo
+          echo "===== last 40 log lines ====="
+          tail -n 40 build.log || echo "(no build.log)"
 
       - name: Verify the build produced real data
-        # If Yahoo or Mercari blocks the runner, dashboard.py still writes a
-        # valid but nearly-empty page. Failing here means the previous
-        # deployment stays live instead of being replaced by an empty board.
+        # If both sources block the runner, dashboard.py still writes a valid
+        # but nearly-empty page. Failing here means the previous deployment
+        # stays live instead of being replaced by an empty board.
         run: |
-          python - <<'PY'
-          import sys, pathlib
-          html = pathlib.Path("index.html").read_text(encoding="utf-8")
-          rows = html.count('class="row"')
-          print(f"Rows in output: {rows}")
-          if rows < 5:
-              print("Too few rows - refusing to publish. Keeping the last good deploy.")
-              sys.exit(1)
-          PY
+          ROWS=$(grep -o 'class="row"' index.html | wc -l)
+          echo "Rows in output: $ROWS"
+          if [ "$ROWS" -lt 5 ]; then
+            echo "::error::Only $ROWS rows scraped - refusing to publish. Keeping the last good deploy."
+            exit 1
+          fi
 
       - name: Assemble the site folder
         run: |
