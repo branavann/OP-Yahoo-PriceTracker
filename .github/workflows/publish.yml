@@ -47,8 +47,11 @@ jobs:
           pip list
 
       - name: Build the dashboard
+        # dashboard.py reads template.html from the repo root and injects the
+        # scraped data into it, so both files must be present.
         run: |
           set -o pipefail
+          test -f template.html || { echo "::error::template.html is missing from the repo"; exit 1; }
           python dashboard.py 2>&1 | tee build.log
 
       - name: Diagnostics
@@ -60,7 +63,7 @@ jobs:
           echo "===== output file ====="
           if [ -f index.html ]; then
             echo "index.html size: $(wc -c < index.html) bytes"
-            echo "row count: $(grep -o 'class=\"row\"' index.html | wc -l)"
+            echo "payload items: $(grep -o '"id":' index.html | wc -l)"
           else
             echo "index.html was never created"
           fi
@@ -73,10 +76,16 @@ jobs:
         # but nearly-empty page. Failing here means the previous deployment
         # stays live instead of being replaced by an empty board.
         run: |
-          ROWS=$(grep -o 'class="row"' index.html | wc -l)
-          echo "Rows in output: $ROWS"
-          if [ "$ROWS" -lt 5 ]; then
-            echo "::error::Only $ROWS rows scraped - refusing to publish. Keeping the last good deploy."
+          ITEMS=$(python - <<'PY'
+          import json,re,pathlib
+          h=pathlib.Path("index.html").read_text(encoding="utf-8")
+          m=re.search(r'<script id="market-data"[^>]*>(.*?)</script>',h,re.S)
+          print(len(json.loads(m.group(1))["items"]) if m else 0)
+          PY
+          )
+          echo "Items in payload: $ITEMS"
+          if [ "$ITEMS" -lt 5 ]; then
+            echo "::error::Only $ITEMS sales scraped - refusing to publish. Keeping the last good deploy."
             exit 1
           fi
 
