@@ -299,6 +299,14 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
 [data-theme="dark"] .delta.up{color:#4ade80}
 [data-theme="dark"] .delta.down{color:#f87171}
 
+.flag{
+  font-size:9.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  border-radius:4px;padding:1.5px 5px;
+}
+.flag.rec{background:linear-gradient(100deg,#f5a9d0,#ffd98e);color:#5c3d16}
+.flag.new{background:var(--accent);color:#fff}
+.chip.kind{font-weight:700;color:var(--ink-3)}
+
 .toolbar-extra{display:flex;gap:9px;align-items:center;margin-left:auto}
 .link-btn{font-size:12px;font-weight:500;color:var(--ink-3)}
 .link-btn:hover{color:var(--accent)}
@@ -459,7 +467,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
   var setStats = DATA.sets || [];
 
   var state = {
-    q:"", sets:new Set(), sources:new Set(),
+    q:"", sets:new Set(), sources:new Set(), kinds:new Set(),
     sort:"price", cur:"jpy", tab:0,
     limit:{}
   };
@@ -492,6 +500,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
   function matches(it){
     if(state.sets.size && !state.sets.has(it.set)) return false;
     if(state.sources.size && !state.sources.has(it.source)) return false;
+    if(state.kinds.size && !state.kinds.has(it.kind || "single")) return false;
     if(state.q){
       var hay = (it.title + " " + (it.set||"") + " " + (it.card||"")).toLowerCase();
       if(hay.indexOf(state.q) === -1) return false;
@@ -532,9 +541,15 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
     el.querySelector(".featured").style.cursor = "pointer";
   }
 
+  var KIND_LABEL = {graded:"Graded", lot:"Lot"};
+
   function metaHTML(it){
-    var bits = ['<span class="tag '+esc(it.source)+'">'+esc(SOURCE_LABEL[it.source]||it.source)+'</span>'];
+    var bits = [];
+    if(it.record) bits.push('<span class="flag rec">'+(it.record==="card"?"Card record":"Set record")+'</span>');
+    if(it.is_new) bits.push('<span class="flag new">New</span>');
+    bits.push('<span class="tag '+esc(it.source)+'">'+esc(SOURCE_LABEL[it.source]||it.source)+'</span>');
     if(it.set) bits.push('<span class="chip">'+esc(it.set)+'</span>');
+    if(KIND_LABEL[it.kind]) bits.push('<span class="chip kind">'+KIND_LABEL[it.kind]+'</span>');
     if(it.card) bits.push('<span class="chip code">'+esc(it.card)+'</span>');
     var bids = (it.bids && it.source !== "marketplace") ? " · " + it.bids + " bids" : "";
     bits.push('<span class="when">'+dayLabel(it.end)+bids+'</span>');
@@ -590,6 +605,13 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
              esc(n)+'<span class="n">'+counts[n]+'</span></button>';
     }).join("");
 
+    html += [["single","Singles"],["graded","Graded"],["lot","Lots"]].filter(function(k){
+      return items.some(function(it){ return it.kind===k[0]; });
+    }).map(function(k){
+      return '<button class="chip-btn" data-kind="'+k[0]+'" aria-pressed="'+state.kinds.has(k[0])+'">' +
+             k[1]+'</button>';
+    }).join("");
+
     html += ['auction','marketplace','mercari'].filter(function(s){
       return items.some(function(it){ return it.source===s; });
     }).map(function(s){
@@ -638,6 +660,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
     if(state.q) p.push("q=" + encodeURIComponent(state.q));
     if(state.sets.size) p.push("set=" + encodeURIComponent([].concat(Array.from(state.sets)).join("|")));
     if(state.sources.size) p.push("src=" + Array.from(state.sources).join("|"));
+    if(state.kinds.size) p.push("kind=" + Array.from(state.kinds).join("|"));
     if(state.sort !== "price") p.push("sort=" + state.sort);
     if(state.cur !== "jpy") p.push("cur=" + state.cur);
     history.replaceState(null, "", p.length ? "#" + p.join("&") : location.pathname);
@@ -649,6 +672,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
       if(k === "q"){ state.q = v; document.getElementById("search").value = v; }
       else if(k === "set"){ v.split("|").filter(Boolean).forEach(function(s){ state.sets.add(s); }); }
       else if(k === "src"){ v.split("|").filter(Boolean).forEach(function(s){ state.sources.add(s); }); }
+      else if(k === "kind"){ v.split("|").filter(Boolean).forEach(function(s){ state.kinds.add(s); }); }
       else if(k === "sort" && v === "recent"){ state.sort = "recent"; }
       else if(k === "cur" && v === "usd"){ state.cur = "usd"; }
     });
@@ -703,6 +727,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
         '<dl class="dl">' +
           '<dt>Set</dt><dd>'+esc(it.set||"—")+'</dd>' +
           '<dt>Card number</dt><dd>'+esc(it.card||"—")+'</dd>' +
+          '<dt>Listing type</dt><dd>'+(KIND_LABEL[it.kind]||"Single")+'</dd>' +
           '<dt>Sold via</dt><dd>'+esc(SOURCE_LABEL[it.source]||it.source)+'</dd>' +
           '<dt>Sold</dt><dd>'+dayLabel(it.end)+' · '+relative(it.end)+'</dd>' +
           bidRow +
@@ -726,11 +751,14 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
   function refresh(){ renderFeatured(); renderBoard(); }
 
   document.addEventListener("click", function(e){
-    var t = e.target.closest("[data-set],[data-source],[data-sort],[data-cur],[data-tab],[data-more],[data-clear],[data-close],[data-copy],.row");
+    var t = e.target.closest("[data-set],[data-kind],[data-source],[data-sort],[data-cur],[data-tab],[data-more],[data-clear],[data-close],[data-copy],.row");
     if(!t) return;
 
     if(t.dataset.set !== undefined){
       state.sets.has(t.dataset.set) ? state.sets.delete(t.dataset.set) : state.sets.add(t.dataset.set);
+      renderChips(); renderFilterCount(); renderPulse(); writeHash(); refresh();
+    } else if(t.dataset.kind !== undefined){
+      state.kinds.has(t.dataset.kind) ? state.kinds.delete(t.dataset.kind) : state.kinds.add(t.dataset.kind);
       renderChips(); renderFilterCount(); renderPulse(); writeHash(); refresh();
     } else if(t.dataset.source !== undefined){
       state.sources.has(t.dataset.source) ? state.sources.delete(t.dataset.source) : state.sources.add(t.dataset.source);
@@ -750,7 +778,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
     } else if(t.dataset.more !== undefined){
       state.limit[+t.dataset.more] = Infinity; renderBoard();
     } else if(t.hasAttribute("data-clear")){
-      state.sets.clear(); state.sources.clear(); state.q = "";
+      state.sets.clear(); state.sources.clear(); state.kinds.clear(); state.q = "";
       document.getElementById("search").value = "";
       renderChips(); renderFilterCount(); renderPulse(); writeHash(); refresh();
     } else if(t.hasAttribute("data-close")){
@@ -787,7 +815,7 @@ footer{border-top:1px solid var(--hair);padding:26px 0 44px;text-align:center;fo
   });
 
   function renderFilterCount(){
-    var n = state.sets.size + state.sources.size;
+    var n = state.sets.size + state.sources.size + state.kinds.size;
     var b = document.getElementById("filter-count");
     b.hidden = n === 0;
     b.textContent = n;
