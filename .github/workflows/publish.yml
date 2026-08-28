@@ -26,6 +26,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+        with:
+          # Full history: the archive commit rebases onto whatever landed
+          # while the scrape was running, and rebasing a shallow clone fails.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -92,18 +96,49 @@ jobs:
           fi
 
       - name: Commit the sales archive
-        # Without this the archive resets every run and 30d change never
-        # becomes computable. Skipped when nothing changed.
+        # The scrape takes ~10 minutes, so the remote can move underneath us
+        # (a manual commit, or the previous run finishing). Rebase and retry
+        # rather than failing.
+        #
+        # continue-on-error: publishing the site matters more than storing
+        # the archive. If this can't push, the site still deploys and the
+        # archive catches up next hour.
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add data/history.json
           if git diff --staged --quiet; then
             echo "Archive unchanged - nothing to commit."
-          else
-            git commit -m "Update sales archive [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "Update sales archive [skip ci]"
+
+          for attempt in 1 2 3; do
+            if git push; then
+              echo "Archive pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push rejected - remote moved. Rebasing (attempt $attempt)..."
+            if ! git pull --rebase --autostash origin "${GITHUB_REF_NAME}"; then
+              # Only the archive can realistically conflict, and only if
+              # something else rewrote it during this run. Defer to the
+              # remote and drop our archive commit: this is self-healing,
+              # because the next run rescrapes a full 30 days and re-merges,
+              # whereas force-keeping our copy could discard another run's
+              # sales permanently.
+              echo "Conflict on the archive - deferring to the remote copy."
+              git rebase --abort || true
+              git reset --hard "origin/${GITHUB_REF_NAME}" || true
+              echo "Archive commit dropped; next run will re-merge."
+              exit 0
+            fi
+          done
+
+          echo "::warning::Could not push the archive after 3 attempts. \
+          The site will still deploy; the archive will catch up next run."
+          exit 1
 
       - name: Assemble the site folder
         run: |
