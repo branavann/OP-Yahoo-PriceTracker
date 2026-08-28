@@ -99,14 +99,43 @@ SET_SIGNATURES = [
 # Flattened for quick membership checks.
 ALL_SET_KEYWORDS = [kw for _, kws in SET_SIGNATURES for kw in kws]
 
+# --- Franchise guard --------------------------------------------------
+# Several of these sets are multi-franchise: Miracle Battle Carddass and
+# J-Heroes cover Dragon Ball, Naruto, Toriko and more. Broad set-name
+# queries are the only way to get good recall, so every result must also
+# prove it is One Piece before it qualifies.
+ONE_PIECE_TOKENS = [
+    "ワンピース", "ONE PIECE", "ONEPIECE", "麦わら", "ワンピ",
+    # Main crew and the characters that actually carry value in these sets.
+    "ルフィ", "ゾロ", "ナミ", "ウソップ", "サンジ", "チョッパー",
+    "ロビン", "フランキー", "ブルック", "ジンベエ",
+    "エース", "サボ", "白ひげ", "シャンクス", "ミホーク", "ハンコック",
+    # NB: bare "ロー" is deliberately absent - it is a substring of
+    # "ヒーローズ", which matched every J-Heroes card of every franchise.
+    "トラファルガー", "バギー", "クロコダイル",
+    "ドフラミンゴ", "カイドウ", "ビッグマム", "ゴールドロジャー", "ロジャー",
+]
+
+# --- Listing kind -----------------------------------------------------
+# A graded PSA 10 and a raw single are not comparable prices, and neither
+# is a 50-card lot. Tagging them lets the board separate the three.
+LOT_KEYWORDS = ["まとめ", "セット", "コンプ", "フルコンプ", "一括", "大量",
+                "枚セット", "点セット", "詰め合わせ", "まとめ売り"]
+GRADED_RE = re.compile(r"\b(?:PSA|BGS|CGC|ARS)\s?(?:10|9\.5|9|8|7)\b|鑑定品|鑑定済", re.IGNORECASE)
+LOT_COUNT_RE = re.compile(r"(\d{2,4})\s*枚")
+
 
 SEARCH_QUERIES = [
+    # Yahoo matches all words in a query, so "ワンピース ハイパーバトル"
+    # misses a listing titled "カードダス ハイパーバトル ルフィ C05".
+    # Bare set names give far better recall; the franchise guard and the
+    # set filter keep the extra results clean.
     # --- Carddass / Hyper Battle / Visual Adventure ------------------
+    "ハイパーバトル",
+    "ビジュアルアドベンチャー",
+    "カードダスマスターズ",
     "ワンピース カードダス",
-    "ワンピース ハイパーバトル",
-    "ONE PIECE ハイパーバトル",
-    "ワンピース ビジュアルアドベンチャー",
-    "ワンピース カードダスマスターズ",
+    "ONE PIECE カードダス",
 
     # --- 2002-2005 One Piece Card Game (tournament / promo) ----------
     "ワンピース 旧裏",
@@ -115,19 +144,19 @@ SEARCH_QUERIES = [
     "ワンピース カードゲーム 2002",
 
     # --- Data Carddass: Berry Match family ---------------------------
-    "ワンピース ベリーマッチ",
-    "ワンピース ベリーマッチW",
-    "ワンピース ベリーマッチIC",
+    "ベリーマッチ",
+    "ベリーマッチIC",
     "データカードダス ワンピース",
 
     # --- Miracle Battle Carddass / J-Heroes --------------------------
+    # Multi-franchise sets: broad here, filtered by ONE_PIECE_TOKENS.
     "ミラクルバトルカードダス ワンピース",
-    "ワンピース ミラバト キラ",
-    "ワンピース Jヒーローズ",
+    "ミラバト ワンピース",
+    "Jヒーローズ ワンピース",
 
     # --- AR Formation ------------------------------------------------
-    "ワンピース ARカードダス",
-    "ワンピース ARフォーメーション",
+    "ARカードダス",
+    "ARフォーメーション",
 ]
 
 # The three columns. (label, hours, how many to show)
@@ -374,11 +403,29 @@ def parse_results(page_html: str) -> list:
             "source": "marketplace" if is_flea else "auction",
             "card_number": extract_card_number(title),
             "set_name": identify_set(title),
+            "kind": classify_kind(title),
             "image_url": raw.get("imageUrl") or "",
             "end_date": parse_end_time(raw.get("endTime")),
             "bid_count": raw.get("bidCount"),
         })
     return items
+
+
+def classify_kind(title: str) -> str:
+    """'graded', 'lot' or 'single'. Graded wins: a PSA 10 in a lot title is
+    still the thing setting the price."""
+    if GRADED_RE.search(title):
+        return "graded"
+    if any(k in title for k in LOT_KEYWORDS):
+        return "lot"
+    m = LOT_COUNT_RE.search(title)
+    if m and int(m.group(1)) >= 10:      # "50枚" is a lot; "1枚" is not
+        return "lot"
+    return "single"
+
+
+def is_one_piece(title: str) -> bool:
+    return any(tok in title for tok in ONE_PIECE_TOKENS)
 
 
 def identify_set(title: str) -> str:
@@ -404,6 +451,11 @@ def is_wanted(item: dict) -> bool:
     if MODERN_CODE_RE.search(title):
         return False
     if any(modern in title for modern in MODERN_TCG_KEYWORDS):
+        return False
+
+    # Broad set-name queries pull in other franchises (Miracle Battle and
+    # J-Heroes covered Dragon Ball, Naruto and more), so prove it's One Piece.
+    if not is_one_piece(title):
         return False
 
     # Positive requirement: it must look like one of the sets we track.
@@ -476,6 +528,9 @@ def collect_mercari() -> dict:
                              "SOLD_OUT", "STATUS_SOLD_OUT")
     sort_price = _pick_enum(getattr(mercari_lib, "MercariSort", None),
                             "SORT_PRICE", "PRICE", "STATUS_PRICE")
+    sort_recent = _pick_enum(getattr(mercari_lib, "MercariSort", None),
+                             "SORT_CREATED_TIME", "CREATED_TIME", "SORT_CREATED",
+                             "SORT_SCORE")
     order_desc = _pick_enum(getattr(mercari_lib, "MercariOrder", None),
                             "ORDER_DESC", "DESC", "SORT_DESC")
 
@@ -484,32 +539,41 @@ def collect_mercari() -> dict:
                   "API may have changed. Skipping Mercari.")
         return {}
 
-    kwargs = {"status": sold_status}
-    if sort_price is not None:
-        kwargs["sort"] = sort_price
-    if order_desc is not None:
-        kwargs["order"] = order_desc
+    # Two passes, for the same reason as Yahoo. Price-sorted returns the
+    # dearest sales of ALL TIME for a query, so if 80 expensive historical
+    # sales exist, today's big sale never appears. The recency pass is what
+    # actually guarantees we see today.
+    passes = [("price", sort_price)]
+    if sort_recent is not None and sort_recent is not sort_price:
+        passes.append(("recent", sort_recent))
 
     merged = {}
     for query in SEARCH_QUERIES:
-        log.info("Mercari: %s (sold, price desc, max %d)", query, MERCARI_MAX_PER_QUERY)
-        try:
-            # search() yields lazily and would otherwise walk every page.
-            results = itertools.islice(
-                mercari_lib.search(query, **kwargs), MERCARI_MAX_PER_QUERY
-            )
-            count = 0
-            for raw in results:
-                item = normalise_mercari_item(raw)
-                if item:
-                    merged.setdefault(item["auction_id"], item)
-                    count += 1
-            log.info("  collected %d listings", count)
-        except Exception as e:
-            # One bad query shouldn't sink the whole build.
-            log.error("  Mercari query failed (%s): %s", query, e)
+        for label, sort_key in passes:
+            kwargs = {"status": sold_status}
+            if sort_key is not None:
+                kwargs["sort"] = sort_key
+            if order_desc is not None:
+                kwargs["order"] = order_desc
 
-        time.sleep(MERCARI_DELAY_SEC)
+            log.info("Mercari: %s (sold, %s, max %d)", query, label, MERCARI_MAX_PER_QUERY)
+            try:
+                # search() yields lazily and would otherwise walk every page.
+                results = itertools.islice(
+                    mercari_lib.search(query, **kwargs), MERCARI_MAX_PER_QUERY
+                )
+                count = 0
+                for raw in results:
+                    item = normalise_mercari_item(raw)
+                    if item:
+                        merged.setdefault(item["auction_id"], item)
+                        count += 1
+                log.info("  collected %d listings", count)
+            except Exception as e:
+                # One bad query shouldn't sink the whole build.
+                log.error("  Mercari query failed (%s, %s): %s", query, label, e)
+
+            time.sleep(MERCARI_DELAY_SEC)
 
     log.info("Mercari unique listings: %d", len(merged))
     return merged
@@ -552,6 +616,7 @@ def normalise_mercari_item(raw):
             "source": "mercari",
             "card_number": extract_card_number(title),
             "set_name": identify_set(title),
+            "kind": classify_kind(title),
             "image_url": getattr(raw, "imageURL", "") or "",
             "end_date": end_date,
             "bid_count": bid_count,
@@ -585,6 +650,9 @@ def merge_history(history: dict, all_items: dict) -> dict:
     First sighting wins: a listing's price is final once sold, and keeping
     the original record avoids a later re-scrape shifting a past figure."""
     added = 0
+    # A single stamp for the whole run: per-item timestamps would make every
+    # item its own "batch" and break new-arrival detection.
+    batch_stamp = dt.datetime.now(dt.timezone.utc).isoformat()
     for item in all_items.values():
         if not is_wanted(item) or not item["end_date"]:
             continue
@@ -599,9 +667,11 @@ def merge_history(history: dict, all_items: dict) -> dict:
             "source": item["source"],
             "set": item.get("set_name") or "",
             "card": item.get("card_number") or "",
+            "kind": item.get("kind") or "single",
             "image": item.get("image_url") or "",
             "end": item["end_date"].astimezone(dt.timezone.utc).isoformat(),
             "bids": item.get("bid_count"),
+            "first_seen": batch_stamp,
         }
         added += 1
 
@@ -708,7 +778,49 @@ def build_payload(all_items: dict, rate: float, history: dict = None) -> dict:
     rows.sort(key=lambda r: r["price"], reverse=True)
     rows = rows[:PAYLOAD_CAP]
 
-    log.info("Payload: %d items", len(rows))
+    # --- record highs -------------------------------------------------
+    # A sale is a record if nothing in the whole archive for that set (or
+    # that specific card number) ever went higher. This is the signal worth
+    # noticing: not "expensive", but "the most this has ever sold for".
+    # Track the best price and how many sales share it. A price matched by
+    # several listings isn't a record - it's just the going rate.
+    def note(store, key, price):
+        cur = store.get(key)
+        if cur is None or price > cur[0]:
+            store[key] = [price, 1]
+        elif price == cur[0]:
+            cur[1] += 1
+
+    set_best, card_best = {}, {}
+    for rec in source.values():
+        if rec.get("set"):
+            note(set_best, rec["set"], rec["price"])
+        if rec.get("card"):
+            note(card_best, rec["card"], rec["price"])
+
+    # --- new since the previous run -----------------------------------
+    seen_times = [r.get("first_seen") for r in source.values() if r.get("first_seen")]
+    newest_batch = max(seen_times) if seen_times else None
+
+    out = []
+    for rec in rows:
+        r = dict(rec)
+        r["record"] = ""
+        cb = card_best.get(rec.get("card") or "")
+        sb = set_best.get(rec.get("set") or "")
+        if cb and cb[1] == 1 and rec["price"] == cb[0]:
+            r["record"] = "card"
+        elif sb and sb[1] == 1 and rec["price"] == sb[0]:
+            r["record"] = "set"
+        r["is_new"] = bool(newest_batch and rec.get("first_seen") == newest_batch)
+        r.pop("first_seen", None)
+        out.append(r)
+    rows = out
+
+    log.info("Payload: %d items (%d new this run, %d record highs)",
+             len(rows),
+             sum(1 for r in rows if r["is_new"]),
+             sum(1 for r in rows if r["record"]))
     return {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "rate": rate,
