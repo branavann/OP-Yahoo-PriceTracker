@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Fonts fetched at build time (see postkit/design.py)
+node_modules
+
+# Generated posts - the PNGs are deliverables, not source
+posts/
+
+# Scraper scratch
+fx_cache.json
+index.html
+debug_*.html
+build.log
