@@ -36,7 +36,9 @@ def jpy_to_usd() -> float:
     build - a post with a slightly stale conversion beats no post."""
     try:
         import urllib.request
-        with urllib.request.urlopen(FX_ENDPOINT, timeout=15) as resp:
+        from .render import _ssl_context
+        with urllib.request.urlopen(FX_ENDPOINT, timeout=15,
+                                    context=_ssl_context()) as resp:
             rate = float(json.load(resp)["rates"]["USD"])
         print(f"FX: 1 USD = {1/rate:,.1f} JPY")
         return rate
@@ -73,6 +75,24 @@ def main(argv=None):
     if not archive.exists():
         print(f"Can't find the sales archive at {archive}.")
         print("Run this from the repository folder, the one containing dashboard.py.")
+        return 2
+
+    # Check the fonts BEFORE doing any work. Rendering is the last step, so
+    # otherwise a missing font throws away the whole run at the finish line -
+    # after the scrape and after every photo download.
+    from .design import FONT_SEARCH_PATHS, _find_font
+    try:
+        _find_font("instrument-serif-latin-400-normal.woff2")
+    except FileNotFoundError:
+        print("The slide fonts aren't installed.\n")
+        print("  Looked in:")
+        for p in FONT_SEARCH_PATHS:
+            print(f"    {p}")
+        print("\n  Fix: from the project folder (the one with dashboard.py), run")
+        print("    npm install @fontsource/instrument-serif @fontsource/inter "
+              "@fontsource/newsreader")
+        print("\n  npm installs into whatever folder you happen to be standing")
+        print("  in, so this usually means it ran somewhere else.")
         return 2
 
     banner(f"Building the post for {day}")

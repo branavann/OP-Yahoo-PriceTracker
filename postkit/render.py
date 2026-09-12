@@ -13,6 +13,20 @@ import mimetypes
 from .design import build_html, W, H
 
 
+def _ssl_context():
+    """macOS Pythons installed from python.org do not use the system
+    certificate store, so every HTTPS fetch fails with
+    CERTIFICATE_VERIFY_FAILED until Install Certificates.command is run.
+    Prefer certifi's bundle when it's available so the download works
+    either way."""
+    import ssl
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def fetch_image_data_uri(url: str, timeout: int = 20):
     """Listing photo -> data: URI, so the render needs no network and the
     PNG can't break later if the listing is deleted.
@@ -20,8 +34,11 @@ def fetch_image_data_uri(url: str, timeout: int = 20):
     Yahoo serves a 300px thumbnail by default; its CDN accepts larger
     dimensions on the same URL, which matters on a 1080px canvas.
 
-    Returns None on any failure - a missing photo degrades to the empty
-    plate rather than failing the build."""
+    Returns (data_uri, error). A missing photo degrades to the empty plate
+    rather than failing the build - but the caller is told WHY, because a
+    silent "MISS" on all three photos hides a single fixable cause (an SSL
+    trust store that was never set up, say) behind what looks like three
+    dead listings."""
     import re
     import urllib.request
 
@@ -34,6 +51,8 @@ def fetch_image_data_uri(url: str, timeout: int = 20):
         candidates.insert(0, url.replace("/thumb/item/webp/", "/item/detail/orig/")
                                .split("?")[0])
 
+    ctx = _ssl_context()
+    last_error = "no candidate URLs"
     for cand in candidates:
         try:
             req = urllib.request.Request(cand, headers={
@@ -42,25 +61,44 @@ def fetch_image_data_uri(url: str, timeout: int = 20):
                                "Chrome/120.0.0.0 Safari/537.36"),
                 "Referer": "https://auctions.yahoo.co.jp/",
             })
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
                 blob = resp.read()
                 ctype = resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
             if len(blob) < 1200:        # a placeholder "no image" pixel
+                last_error = f"response was only {len(blob)} bytes"
                 continue
-            return f"data:{ctype};base64,{base64.b64encode(blob).decode()}"
-        except Exception:
+            return f"data:{ctype};base64,{base64.b64encode(blob).decode()}", None
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
             continue
-    return None
+    return None, last_error
 
 
 def attach_images(post: dict, verbose=True) -> dict:
+    errors = []
     for s in post["sales"]:
         if not s.get("image"):
+            s["image_data"] = None
             continue
-        data = fetch_image_data_uri(s["image"])
+        data, error = fetch_image_data_uri(s["image"])
         s["image_data"] = data
         if verbose:
             print(f"  photo {'ok  ' if data else 'MISS'}  {s['display_name'][:40]}")
+            if error:
+                print(f"              {error}")
+        if error:
+            errors.append(error)
+
+    # Every photo failing the same way is one problem, not three. Say so,
+    # and name the fix for the cause that actually accounts for most of them.
+    if verbose and len(errors) == len(post["sales"]) and errors:
+        print("\n  Every photo failed. That is usually one cause, not three.")
+        if any("CERTIFICATE_VERIFY" in e or "SSLError" in e for e in errors):
+            print("  This Python has no certificate store. Fix it once with:")
+            print("    /Applications/Python\\ 3.x/Install\\ Certificates.command")
+            print("  (substitute your version), or:  pip install certifi")
+        else:
+            print("  Check your internet connection, then try again.")
     return post
 
 
